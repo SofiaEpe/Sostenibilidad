@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>El Sendero de las Aves · Experiencia 3D</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #cfe8ee; font-family: "Segoe UI", system-ui, sans-serif; }
+  canvas { display: block; }
+
+  /* ---------- Pantalla de inicio / pausa (mismo estilo del proyecto anterior) ---------- */
+  #overlay {
+    position: fixed; inset: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, rgba(28,58,34,.55), rgba(12,28,16,.85));
+    transition: opacity .4s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  .panel {
+    max-width: 520px; width: 92%;
+    background: #f3e6cc; color: #3b2a16;
+    border-radius: 14px; padding: 34px 38px 30px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.45);
+    border: 3px solid #b88c55; text-align: center;
+  }
+  .panel h1 { font-family: Georgia, serif; font-size: 30px; color: #2d4a2f; margin-bottom: 6px; }
+  .panel .sub { font-style: italic; color: #7a5a32; margin-bottom: 22px; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 9px 14px; text-align: left; margin: 0 auto 24px; max-width: 380px; font-size: 15px; }
+  .keys kbd {
+    display: inline-block; min-width: 26px; padding: 3px 7px; margin-right: 3px;
+    background: #fff8ea; border: 1px solid #b88c55; border-bottom-width: 3px;
+    border-radius: 5px; font-family: inherit; font-size: 13px; text-align: center;
+  }
+  #startBtn {
+    background: #6f9e2e; color: #fff; border: none; cursor: pointer;
+    font-size: 18px; font-weight: 600; padding: 13px 40px; border-radius: 40px;
+    box-shadow: 0 5px 0 #4b6e1c; transition: transform .1s, box-shadow .1s;
+  }
+  #startBtn:hover { background: #7db236; }
+  #startBtn:active { transform: translateY(4px); box-shadow: 0 1px 0 #4b6e1c; }
+  #loading { margin-top: 14px; font-size: 13px; color: #8a6a3e; }
+
+  /* ---------- Mira central ---------- */
+  #crosshair {
+    position: fixed; left: 50%; top: 50%; z-index: 10;
+    width: 8px; height: 8px; margin: -4px 0 0 -4px;
+    border-radius: 50%; border: 2px solid rgba(255,255,255,.85);
+    box-shadow: 0 0 4px rgba(0,0,0,.5); pointer-events: none;
+  }
+
+  /* ---------- Aviso al chocar con la pared invisible ---------- */
+  #toast {
+    position: fixed; left: 50%; bottom: 12%; transform: translateX(-50%) translateY(10px);
+    z-index: 12; pointer-events: none;
+    background: #f3e6cc; color: #3b2a16; border: 2px solid #b88c55;
+    padding: 9px 20px; border-radius: 30px; font-size: 15px;
+    box-shadow: 0 8px 20px rgba(0,0,0,.3);
+    opacity: 0; transition: opacity .3s, transform .3s;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+
+<!-- Three.js desde CDN (requiere conexión a internet) -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="overlay">
+  <div class="panel">
+    <h1>El Sendero de las Aves</h1>
+    <div class="sub">Camina bajo la pérgola y mira cómo vuelan las sombras de las aves</div>
+    <div class="keys">
+      <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>Caminar (o flechas)</span>
+      <span><kbd>Shift</kbd></span><span>Caminar más rápido</span>
+      <span><kbd>Ratón</kbd></span><span>Mirar alrededor</span>
+      <span><kbd>B</kbd></span><span>Mostrar / ocultar la barrera invisible</span>
+      <span><kbd>Esc</kbd></span><span>Pausar / liberar el ratón</span>
+    </div>
+    <button id="startBtn">Entrar al sendero</button>
+    <div id="loading">Cargando Three.js…</div>
+  </div>
+</div>
+
+<div id="crosshair"></div>
+<div id="toast">Hasta aquí puedes llegar 🌿</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* =========================================================
+   UTILIDADES
+   ========================================================= */
+const V = THREE.Vector3;
+let seed = 2024;
+function rand() { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+const rr = (a, b) => a + rand() * (b - a);
+const pick = arr => arr[Math.floor(rand() * arr.length)];
+const clamp = THREE.MathUtils.clamp;
+
+function canvasTex(w, h, draw, repeat, colorData = true) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = colorData ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  t.anisotropy = 8;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  return t;
+}
+
+/* =========================================================
+   RENDERER, ESCENA, CÁMARA
+   ========================================================= */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;                 // ← sombras activadas (necesario para las aves)
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const FOG_COLOR = 0xd3ebee;
+scene.fog = new THREE.Fog(FOG_COLOR, 25, 170);
+
+const EYE = 1.7;   // altura de los ojos de una persona promedio (metros)
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 700);
+camera.position.set(0, EYE, 18);
+camera.lookAt(0, 2.6, 0);
+
+/* =========================================================
+   CIELO Y NUBES
+   ========================================================= */
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(450, 32, 16),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { top: { value: new THREE.Color(0x4fa6d9) }, mid: { value: new THREE.Color(FOG_COLOR) } },
+    vertexShader: `varying vec3 vDir;
+      void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform vec3 top; uniform vec3 mid; varying vec3 vDir;
+      void main(){
+        float h = max(vDir.y, 0.0);
+        gl_FragColor = vec4(mix(mid, top, smoothstep(0.0, 0.6, pow(h, 0.8))), 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`
+  })
+);
+scene.add(sky);
+
+{
+  const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x9aaab8, fog: false });
+  const cloudGeo = new THREE.IcosahedronGeometry(1, 2);
+  for (let i = 0; i < 10; i++) {
+    const c = new THREE.Group();
+    const a = rand() * Math.PI * 2, d = rr(180, 300);
+    c.position.set(Math.cos(a) * d, rr(70, 120), Math.sin(a) * d);
+    for (let k = 0; k < 6; k++) {
+      const p = new THREE.Mesh(cloudGeo, cloudMat);
+      const s = rr(8, 16);
+      p.scale.set(s * 1.4, s * .6, s);
+      p.position.set(rr(-20, 20), rr(-3, 4), rr(-8, 8));
+      c.add(p);
+    }
+    scene.add(c);
+  }
+}
+
+/* =========================================================
+   LUCES  (el sol es la luz que dibuja las aves en el suelo)
+   ========================================================= */
+scene.add(new THREE.HemisphereLight(0xd6efff, 0x5d7d3a, .85));
+
+const sun = new THREE.DirectionalLight(0xfff1d6, 2.8);
+sun.position.set(5, 22, -4);           // sol alto, un poco de lado: las aves caen sobre el sendero
+sun.target.position.set(0, 0, -9);
+scene.add(sun.target);
+sun.castShadow = true;
+sun.shadow.mapSize.set(4096, 4096);    // mapa grande = siluetas de aves nítidas
+Object.assign(sun.shadow.camera, { left: -14, right: 14, top: 18, bottom: -18, near: 1, far: 60 });
+sun.shadow.bias = -0.0003;
+sun.shadow.normalBias = 0.02;
+sun.shadow.radius = 2;
+scene.add(sun);
+
+/* =========================================================
+   TEXTURAS PROCEDURALES
+   ========================================================= */
+const grassTex = canvasTex(512, 512, (g, w, h) => {
+  g.fillStyle = '#6aa53a'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 9000; i++) {
+    g.fillStyle = `hsla(${rr(78, 108)},${rr(35, 60)}%,${rr(28, 50)}%,${rr(.15, .45)})`;
+    g.fillRect(rand() * w, rand() * h, rr(1, 3), rr(2, 7));
+  }
+}, [70, 70]);
+
+const dirtTex = canvasTex(256, 512, (g, w, h) => {
+  g.fillStyle = '#a57d50'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 4000; i++) {
+    g.fillStyle = `rgba(${rr(110, 190) | 0},${rr(80, 140) | 0},${rr(45, 90) | 0},${rr(.2, .6)})`;
+    g.fillRect(rand() * w, rand() * h, rr(1, 3), rr(1, 3));
+  }
+  for (let i = 0; i < 160; i++) {                     // piedritas
+    g.fillStyle = `hsl(${rr(25, 40)},${rr(10, 25)}%,${rr(55, 75)}%)`;
+    g.beginPath(); g.ellipse(rand() * w, rand() * h, rr(2, 5), rr(1.5, 4), rand() * 3, 0, Math.PI * 2); g.fill();
+  }
+  // bordes con hierba
+  const grd = g.createLinearGradient(0, 0, w, 0);
+  grd.addColorStop(0, 'rgba(90,140,50,.85)'); grd.addColorStop(.12, 'rgba(90,140,50,0)');
+  grd.addColorStop(.88, 'rgba(90,140,50,0)'); grd.addColorStop(1, 'rgba(90,140,50,.85)');
+  g.fillStyle = grd; g.fillRect(0, 0, w, h);
+}, [1, 12]);
+
+const woodTex = canvasTex(256, 512, (g, w, h) => {
+  g.fillStyle = '#9a6a3f'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 160; i++) {
+    const x = rand() * w;
+    g.strokeStyle = rand() < .7 ? `rgba(70,40,18,${rr(.2, .5)})` : `rgba(200,150,100,${rr(.15, .35)})`;
+    g.lineWidth = rr(1, 3);
+    // vetas que recorren TODO el alto y vuelven al mismo punto (textura sin costura)
+    const ph = rand() * Math.PI * 2, waves = 1 + Math.floor(rand() * 3);
+    g.beginPath();
+    for (let y = 0; y <= h; y += 8) {
+      const xx = x + Math.sin(y / h * Math.PI * 2 * waves + ph) * 3;
+      y === 0 ? g.moveTo(xx, y) : g.lineTo(xx, y);
+    }
+    g.stroke();
+  }
+}, [1, 2]);
+
+/* =========================================================
+   MATERIALES
+   ========================================================= */
+const woodMat = new THREE.MeshStandardMaterial({ map: woodTex, bumpMap: woodTex, bumpScale: 1.5, roughness: .85 });
+const leafMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
+const YELLOW  = new THREE.MeshStandardMaterial({ color: 0xf2b233, roughness: .55 });  // franja amarilla cálida
+
+/* =========================================================
+   TERRENO: CÉSPED, SENDERO DE TIERRA Y PISO DE MADERA
+   ========================================================= */
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(700, 700), new THREE.MeshStandardMaterial({ map: grassTex, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Sendero de tierra: llega a la pérgola y continúa por debajo (recibe las sombras de las aves)
+const PATH_W = 3.2;
+const path = new THREE.Mesh(new THREE.PlaneGeometry(PATH_W, 58), new THREE.MeshStandardMaterial({ map: dirtTex, roughness: 1 }));
+path.rotation.x = -Math.PI / 2;
+path.position.set(0, .012, 4);
+path.receiveShadow = true;
+scene.add(path);
+
+// Dimensiones de la pérgola
+const PERGOLA_FRONT_Z = 0;      // entrada
+const PERGOLA_LEN = 24;         // largo (va de z=0 a z=-24)
+const PILLAR_X = 2.9;           // separación de los pilares desde el centro
+const PILLAR_STEP = 3;          // distancia entre pares de pilares
+const EAVE_Y = 4.3;             // altura del borde del techo (antes 3.2)
+const ROOF_RISE = 1.2;          // cuánto sube el techo en el centro (curvatura)
+const ROOF_HALF = 3.2;          // medio ancho del techo
+
+
+
+// Hierba instanciada (evita el sendero y el piso)
+{
+  const bladeGeo = new THREE.ConeGeometry(.035, .32, 3); bladeGeo.translate(0, .16, 0);
+  const N = 16000;
+  const blades = new THREE.InstancedMesh(bladeGeo, new THREE.MeshLambertMaterial(), N);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new V(), p = new V(), e = new THREE.Euler(), c = new THREE.Color();
+  let i = 0;
+  while (i < N) {
+    const x = rr(-40, 40), z = rr(-45, 40);
+    if (Math.abs(x) < PATH_W / 2 + .1 && z > -25.5 && z < 33) continue;   // sendero
+    p.set(x, 0, z);
+    e.set(rr(-.3, .3), rand() * Math.PI * 2, rr(-.3, .3)); q.setFromEuler(e);
+    const sc = rr(.6, 1.5); s.set(sc, sc * rr(.8, 1.5), sc);
+    m.compose(p, q, s); blades.setMatrixAt(i, m);
+    c.setHSL(rr(.22, .3), rr(.45, .62), rr(.27, .42), THREE.SRGBColorSpace); blades.setColorAt(i, c);
+    i++;
+  }
+  blades.receiveShadow = true;
+  scene.add(blades);
+
+  const dotGeo = new THREE.SphereGeometry(.045, 6, 4);
+  const M = 800;
+  const dots = new THREE.InstancedMesh(dotGeo, new THREE.MeshLambertMaterial(), M);
+  const cols = [0xffffff, 0xfff3a0, 0xf7d64a, 0xf5c6e0];
+  for (let k = 0; k < M; k++) {
+    let x, z;
+    do { x = rr(-35, 35); z = rr(-40, 38); } while (Math.abs(x) < PILLAR_X + .5);
+    m.makeTranslation(x, rr(.12, .25), z); dots.setMatrixAt(k, m);
+    c.setHex(pick(cols)); dots.setColorAt(k, c);
+  }
+  scene.add(dots);
+}
+
+/* =========================================================
+   VEGETACIÓN FACETADA (mismo estilo del proyecto anterior)
+   ========================================================= */
+const icoGeo = new THREE.IcosahedronGeometry(1, 1);
+const icoSmall = new THREE.IcosahedronGeometry(1, 0);
+const GREENS = [0x3b6a2c, 0x467634, 0x335d27, 0x52833a, 0x3f7030];
+function blobGeo(x, y, z, sx, sy, sz, hex, base = icoGeo) {
+  const g = base.clone();
+  g.scale(sx, sy, sz);
+  g.rotateY(rand() * Math.PI);
+  g.translate(x, y, z);
+  const col = new THREE.Color(hex); col.offsetHSL(0, 0, rr(-.03, .03));
+  const n = g.attributes.position.count, arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { arr[i * 3] = col.r; arr[i * 3 + 1] = col.g; arr[i * 3 + 2] = col.b; }
+  g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return g;
+}
+
+const colliders = [];   // círculos {x, z, r} que el jugador no puede atravesar
+
+// Arbustos bajos a los lados del sendero y de la pérgola
+{
+  const geos = [];
+  for (let z = 32; z > -30; z -= rr(1.4, 2.4)) {
+    for (const side of [-1, 1]) {
+      if (rand() < .15) continue;
+      const near = z > .8 ? rr(2.3, 4.2) : rr(3.6, 4.8);
+      const x = side * near;
+      const r = rr(.45, .85);
+      const k = 2 + Math.floor(rand() * 3);
+      for (let j = 0; j < k; j++) {
+        const rj = r * rr(.6, 1);
+        geos.push(blobGeo(x + rr(-.4, .4), rj * .55, z + rr(-.4, .4), rj, rj * .7, rj, pick(GREENS)));
+      }
+      if (z > .8) colliders.push({ x, z, r: r * .9 });
+    }
+  }
+  const bushes = new THREE.Mesh(mergeGeometries(geos), leafMat);
+  bushes.castShadow = true; bushes.receiveShadow = true;
+  scene.add(bushes);
+}
+
+// Colinas y árboles lejanos
+{
+  const hills = [
+    [-60, -115, 58, .32, 0x6c9c62], [15, -130, 72, .27, 0x77a66b], [85, -108, 60, .34, 0x6a985e],
+    [-135, -55, 62, .30, 0x7eaa70], [135, -35, 66, .30, 0x74a368], [-125, 65, 62, .28, 0x7eaa70],
+    [115, 95, 72, .30, 0x74a368], [0, 145, 85, .25, 0x77a66b], [-45, -165, 95, .36, 0x88b39d], [65, -170, 95, .33, 0x8cb7a4]
+  ];
+  const hillGeo = new THREE.SphereGeometry(1, 40, 20);
+  for (const [x, z, r, sy, col] of hills) {
+    const h = new THREE.Mesh(hillGeo, new THREE.MeshLambertMaterial({ color: col }));
+    h.position.set(x, -r * sy * .15, z); h.scale.set(r, r * sy, r);
+    scene.add(h);
+  }
+  const leafGeos = [], trunkGeos = [];
+  for (let i = 0; i < 55; i++) {
+    const a = rand() * Math.PI * 2, d = rr(28, 90);
+    const x = Math.cos(a) * d, z = Math.sin(a) * d;
+    if (Math.abs(x) < 9) continue;                 // deja libre la vista del sendero
+    const s = rr(1.2, 2.4);
+    const t = new THREE.CylinderGeometry(.18 * s, .28 * s, 3 * s, 7); t.translate(x, 1.5 * s, z); trunkGeos.push(t);
+    const k = 3 + Math.floor(rand() * 3);
+    for (let j = 0; j < k; j++) {
+      const r = rr(1.2, 1.8) * s;
+      leafGeos.push(blobGeo(x + rr(-1, 1) * s, (3.2 + rr(0, 1.4)) * s, z + rr(-1, 1) * s, r * rr(.9, 1.15), r * rr(.65, .85), r * rr(.9, 1.15), pick(GREENS)));
+    }
+  }
+  const tm = new THREE.Mesh(mergeGeometries(trunkGeos), new THREE.MeshLambertMaterial({ color: 0x6b4c32 }));
+  const lm = new THREE.Mesh(mergeGeometries(leafGeos), leafMat);
+  tm.castShadow = lm.castShadow = true;
+  scene.add(tm, lm);
+}
+
+/* =========================================================
+   LA PÉRGOLA: PILARES, VIGAS Y COSTILLAS
+   ========================================================= */
+// Altura del techo según la posición x (arco de círculo)
+const ROOF_R = (ROOF_HALF * ROOF_HALF + ROOF_RISE * ROOF_RISE) / (2 * ROOF_RISE);
+const roofY = x => EAVE_Y + Math.sqrt(ROOF_R * ROOF_R - x * x) - (ROOF_R - ROOF_RISE);
+
+const pergola = new THREE.Group();
+scene.add(pergola);
+const pillarGeo = new THREE.CylinderGeometry(.14, .16, EAVE_Y - .05, 16);
+const footGeo = new THREE.BoxGeometry(.42, .2, .42);
+const footMat = new THREE.MeshStandardMaterial({ color: 0x9a948a, roughness: 1 });
+const pillarZs = [];
+for (let z = PERGOLA_FRONT_Z; z >= PERGOLA_FRONT_Z - PERGOLA_LEN - .01; z -= PILLAR_STEP) pillarZs.push(z);
+
+for (const z of pillarZs) {
+  for (const side of [-1, 1]) {
+    const x = side * PILLAR_X;
+    const p = new THREE.Mesh(pillarGeo, woodMat);
+    p.position.set(x, (EAVE_Y - .05) / 2, z);
+    p.castShadow = p.receiveShadow = true;
+    const f = new THREE.Mesh(footGeo, footMat);
+    f.position.set(x, .1, z); f.castShadow = f.receiveShadow = true;
+    pergola.add(p, f);
+    colliders.push({ x, z, r: .25 });
+  }
+  // Costilla curva bajo el techo en cada par de pilares
+  const pts = [];
+  for (let i = 0; i <= 24; i++) { const x = -ROOF_HALF + (2 * ROOF_HALF) * i / 24; pts.push(new V(x, roofY(x) - .09, z)); }
+  const rib = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, .07, 8, false), woodMat);
+  rib.castShadow = rib.receiveShadow = true;
+  pergola.add(rib);
+}
+// Vigas longitudinales sobre los pilares
+for (const side of [-1, 1]) {
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(.2, .24, PERGOLA_LEN + .8), woodMat);
+  beam.position.set(side * PILLAR_X, roofY(PILLAR_X) - .2, PERGOLA_FRONT_Z - PERGOLA_LEN / 2);
+  beam.castShadow = beam.receiveShadow = true;
+  pergola.add(beam);
+}
+
+/* =========================================================
+   EL TECHO CURVO CON RECORTES DE AVES  (parte crucial)
+   ---------------------------------------------------------
+   - Se dibuja un "alphaMap" en un canvas: blanco = madera, negro = hueco.
+   - Las aves se pintan en negro → quedan recortadas en el techo.
+   - alphaTest descarta esos píxeles al dibujar Y al calcular la sombra
+     (customDepthMaterial), así el sol proyecta las siluetas en el piso.
+   ========================================================= */
+const ROOF_OVERHANG = .4;
+const ROOF_LEN = PERGOLA_LEN + ROOF_OVERHANG * 2;
+const PX_PER_M = 80;                                     // resolución de la textura del techo
+const TEX_W = Math.round(ROOF_HALF * 2 * PX_PER_M);      // ancho (a lo ancho del techo)
+const TEX_H = Math.round(ROOF_LEN * PX_PER_M);           // alto  (a lo largo del techo)
+
+// Silueta de un ave en vuelo vista desde arriba (unidad = media envergadura)
+function drawBird(g, x, y, s, rot, type) {
+  g.save(); g.translate(x, y); g.rotate(rot); g.scale(s, s);
+  g.beginPath();
+  g.ellipse(0, 0, .09, .3, 0, 0, Math.PI * 2);           // cuerpo
+  g.moveTo(.07, -.33); g.arc(0, -.33, .075, 0, Math.PI * 2); // cabeza
+  g.fill();
+  const tipY = type === 1 ? -.05 : .16;                  // tipo 1: alas más rectas (gaviota)
+  for (const sx of [1, -1]) {                            // alas
+    g.beginPath();
+    g.moveTo(.04 * sx, -.13);
+    g.bezierCurveTo(.35 * sx, -.3, .72 * sx, -.2, 1.0 * sx, tipY);
+    g.bezierCurveTo(.72 * sx, tipY - .1, .42 * sx, .06, .04 * sx, .14);
+    g.closePath(); g.fill();
+  }
+  g.beginPath();                                         // cola
+  if (type === 2) {                                      // golondrina: cola en horquilla
+    g.moveTo(-.06, .24); g.lineTo(-.22, .64); g.lineTo(0, .4); g.lineTo(.22, .64); g.lineTo(.06, .24);
+  } else {
+    g.moveTo(-.07, .24); g.lineTo(-.15, .5); g.lineTo(.15, .5); g.lineTo(.07, .24);
+  }
+  g.closePath(); g.fill();
+  g.restore();
+}
+
+const birdAlpha = canvasTex(TEX_W, TEX_H, (g, w, h) => {
+  g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);          // todo madera…
+  g.fillStyle = '#000';                                  // …menos las aves
+  const placed = [];
+  let tries = 0;
+  while (placed.length < 26 && tries < 3000) {
+    tries++;
+    const span = rr(.55, .9) * PX_PER_M;                 // media envergadura: 0.55 – 0.9 m
+    const x = rr(span + 20, w - span - 20);
+    // (en la textura, la parte de abajo del canvas es la entrada de la pérgola)
+    const y = rr(60, h - ROOF_OVERHANG * PX_PER_M - 90);  // deja libre la franja amarilla de la entrada
+    if (placed.some(p => Math.hypot(p.x - x, p.y - y) < (p.s + span) * 1.15)) continue;
+    // evita que las aves caigan justo encima de una costilla
+    const zFromFront = (h - y) / PX_PER_M - ROOF_OVERHANG;
+    if (Math.abs(zFromFront / PILLAR_STEP - Math.round(zFromFront / PILLAR_STEP)) * PILLAR_STEP < .3) continue;
+    placed.push({ x, y, s: span });
+    // bandada: todas vuelan más o menos hacia la entrada, con variación
+    drawBird(g, x, y, span, Math.PI + rr(-.5, .5), Math.floor(rand() * 3));
+  }
+}, null, false);
+
+const roofWoodTex = canvasTex(TEX_W, TEX_H, (g, w, h) => {
+  // tablas que siguen la curva (atraviesan el techo de lado a lado)
+  for (let y = 0; y < h; y += 26) {
+    g.fillStyle = `hsl(${rr(26, 33)},${rr(42, 55)}%,${rr(44, 56)}%)`;
+    g.fillRect(0, y, w, 26);
+    for (let k = 0; k < 5; k++) {
+      g.strokeStyle = `rgba(90,50,20,${rr(.12, .3)})`; g.lineWidth = 1;
+      const gy = y + rr(3, 23);
+      g.beginPath(); g.moveTo(0, gy); g.lineTo(w, gy + rr(-2, 2)); g.stroke();
+    }
+    g.fillStyle = 'rgba(55,30,12,.55)'; g.fillRect(0, y, w, 2);
+  }
+});
+
+// Geometría: un plano doblado en arco (bóveda de cañón)
+function bentRoofGeo(len, segX, yOffset = 0) {
+  const geo = new THREE.PlaneGeometry(ROOF_HALF * 2, len, segX, 1);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) pos.setY(i, roofY(pos.getX(i)) + yOffset);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const roofMat = new THREE.MeshStandardMaterial({
+  map: roofWoodTex, alphaMap: birdAlpha, alphaTest: .5,
+  side: THREE.DoubleSide, roughness: .85
+});
+const roof = new THREE.Mesh(bentRoofGeo(ROOF_LEN, 48), roofMat);
+roof.position.z = PERGOLA_FRONT_Z + ROOF_OVERHANG - ROOF_LEN / 2;
+roof.castShadow = true;
+roof.receiveShadow = true;
+// Material de profundidad para la sombra: respeta los huecos de las aves
+roof.customDepthMaterial = new THREE.MeshDepthMaterial({
+  depthPacking: THREE.RGBADepthPacking, alphaMap: birdAlpha, alphaTest: .5, side: THREE.DoubleSide
+});
+scene.add(roof);
+
+// Franja amarilla cálida en el borde frontal superior del techo
+{
+  const band = new THREE.Mesh(bentRoofGeo(.45, 48, .012), YELLOW);
+  band.position.z = PERGOLA_FRONT_Z + ROOF_OVERHANG - .225;
+  band.castShadow = true;
+  scene.add(band);
+  const pts = [];
+  for (let i = 0; i <= 32; i++) { const x = -ROOF_HALF + 2 * ROOF_HALF * i / 32; pts.push(new V(x, roofY(x), PERGOLA_FRONT_Z + ROOF_OVERHANG)); }
+  const edge = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, .07, 8, false), YELLOW);
+  edge.castShadow = true;
+  scene.add(edge);
+}
+
+/* =========================================================
+   ENREDADERAS: cuelgan de las vigas y trepan por los pilares
+   ========================================================= */
+{
+  const leaves = [], stems = [];
+  const VINE_GREENS = [0x3f7a2a, 0x4f8a33, 0x356b24, 0x5f9a3c];
+  // Hilos colgantes desde las vigas
+  for (const side of [-1, 1]) {
+    for (let z = PERGOLA_FRONT_Z - .3; z > PERGOLA_FRONT_Z - PERGOLA_LEN; z -= rr(.35, .8)) {
+      if (rand() < .25) continue;
+      const x0 = side * (PILLAR_X + rr(-.12, .12));
+      const top = roofY(PILLAR_X) - .3;
+      const len = rr(.8, 2.1);
+      const wob = rr(0, Math.PI * 2);
+      const stem = new THREE.CylinderGeometry(.012, .012, len, 4);
+      stem.translate(x0, top - len / 2, z);
+      stems.push(stem);
+      for (let t = 0; t < len; t += rr(.09, .16)) {
+        const r = rr(.07, .14) * (1 - t / len * .4);
+        const x = x0 + Math.sin(t * 3 + wob) * .05 + rr(-.05, .05);
+        leaves.push(blobGeo(x, top - t, z + rr(-.06, .06), r, r * .7, r, pick(VINE_GREENS), icoSmall));
+      }
+    }
+    // Follaje sobre la viga
+    for (let z = PERGOLA_FRONT_Z + .2; z > PERGOLA_FRONT_Z - PERGOLA_LEN - .2; z -= rr(.25, .5)) {
+      const r = rr(.15, .3);
+      leaves.push(blobGeo(side * PILLAR_X + rr(-.18, .18), roofY(PILLAR_X) - .12 + rr(-.1, .1), z, r, r * .7, r, pick(VINE_GREENS), icoSmall));
+    }
+  }
+  // Enredadera en espiral subiendo por algunos pilares
+  for (const z of pillarZs) {
+    for (const side of [-1, 1]) {
+      if (rand() < .35) continue;
+      const turns = rr(2.5, 4), phase = rand() * Math.PI * 2;
+      for (let y = .2; y < EAVE_Y - .1; y += .07) {
+        const a = phase + y / EAVE_Y * turns * Math.PI * 2;
+        const r = rr(.06, .11);
+        leaves.push(blobGeo(side * PILLAR_X + Math.cos(a) * .19, y, z + Math.sin(a) * .19, r, r * .7, r, pick(VINE_GREENS), icoSmall));
+      }
+    }
+  }
+  const leafMesh = new THREE.Mesh(mergeGeometries(leaves), leafMat);
+  leafMesh.castShadow = true; leafMesh.receiveShadow = true;
+  const stemMesh = new THREE.Mesh(mergeGeometries(stems), new THREE.MeshStandardMaterial({ color: 0x4a5e2a, roughness: 1 }));
+  stemMesh.castShadow = true;
+  scene.add(leafMesh, stemMesh);
+}
+
+/* =========================================================
+   CONTROLES EN PRIMERA PERSONA
+   ========================================================= */
+const controls = new PointerLockControls(camera, document.body);
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+const crosshair = document.getElementById('crosshair');
+document.getElementById('loading').textContent = '¡Listo! Haz clic para entrar.';
+
+// Modo alternativo "arrastrar para mirar" si el navegador no permite Pointer Lock
+let dragMode = false, paused = true, hasLocked = false;
+const isActive = () => controls.isLocked || (dragMode && !paused);
+function enableDragMode() {
+  dragMode = true; paused = false;
+  overlay.classList.add('hidden');
+  crosshair.style.display = 'none';
+  renderer.domElement.style.cursor = 'grab';
+  startBtn.textContent = 'Seguir caminando';
+}
+startBtn.addEventListener('click', () => {
+  if (dragMode) { paused = false; overlay.classList.add('hidden'); return; }
+  try { const p = controls.lock(); if (p && p.catch) p.catch(() => {}); } catch (e) { enableDragMode(); }
+});
+document.addEventListener('pointerlockerror', () => {
+  if (hasLocked) document.getElementById('loading').textContent = 'Espera un segundo y vuelve a pulsar el botón.';
+  else enableDragMode();
+});
+controls.addEventListener('lock', () => { hasLocked = true; overlay.classList.add('hidden'); startBtn.textContent = 'Seguir caminando'; });
+controls.addEventListener('unlock', () => overlay.classList.remove('hidden'));
+
+const lookEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+let dragging = false;
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (!dragMode || paused || e.button !== 0) return;
+  dragging = true; renderer.domElement.style.cursor = 'grabbing';
+});
+window.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  lookEuler.setFromQuaternion(camera.quaternion);
+  lookEuler.y -= e.movementX * .0045;
+  lookEuler.x = clamp(lookEuler.x - e.movementY * .0045, -1.5, 1.5);
+  camera.quaternion.setFromEuler(lookEuler);
+});
+window.addEventListener('pointerup', () => { if (dragging) { dragging = false; renderer.domElement.style.cursor = 'grab'; } });
+
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+  if (e.code === 'Escape' && dragMode && !paused) { paused = true; overlay.classList.remove('hidden'); }
+  if (e.code === 'KeyB') barrierViz.visible = !barrierViz.visible;
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+/* =========================================================
+   LÍMITES DE MOVIMIENTO  ·  BARRERA INVISIBLE
+   ---------------------------------------------------------
+   Ajusta aquí hasta dónde puede caminar el usuario.
+   Recuerda: la pérgola empieza en z = 0 (entrada) y termina
+   en z = -24. Caminar "hacia adentro" significa ir hacia z negativos.
+   ========================================================= */
+const LIMITES = {
+  // ⬇️ PARED INVISIBLE BAJO LA PÉRGOLA ⬇️
+  // El usuario no puede pasar de este valor de z.
+  //   -18  → tres cuartos de la pérgola (valor actual)
+  //   -12  → mitad de la pérgola
+  //   -23  → casi hasta el final
+  zMaxAvance: -18,
+
+  // No se puede retroceder más allá de este z (detrás del punto de inicio).
+  zInicio: 26,
+
+  // Medio ancho de la zona caminable FUERA de la pérgola (sendero + un poco de césped).
+  xAfuera: 5.5,
+
+  // Medio ancho de la zona caminable BAJO la pérgola (entre las dos filas de pilares).
+  xBajoPergola: 2.3,
+
+  // Radio del "cuerpo" del jugador para las colisiones con arbustos y pilares.
+  radioJugador: .35
+};
+const ENTRADA_Z = PERGOLA_FRONT_Z + .4;  // a partir de aquí se considera "bajo la pérgola"
+
+// Devuelve true si el jugador chocó con la pared invisible del fondo
+function aplicarLimites(p, prev) {
+  let chocoConPared = false;
+
+  // 1) Pared invisible bajo la pérgola (límite de avance en Z)
+  if (p.z < LIMITES.zMaxAvance) { p.z = LIMITES.zMaxAvance; chocoConPared = true; }
+
+  // 2) Límite trasero (no salir por detrás del punto de inicio)
+  if (p.z > LIMITES.zInicio) p.z = LIMITES.zInicio;
+
+  // 3) Bordes laterales
+  if (p.z < ENTRADA_Z) {
+    // Bajo la pérgola: solo entre los pilares
+    if (Math.abs(p.x) > LIMITES.xBajoPergola) {
+      if (prev.z >= ENTRADA_Z) p.z = ENTRADA_Z;          // intentó entrar por fuera de los pilares: lo frena la fachada
+      else p.x = clamp(p.x, -LIMITES.xBajoPergola, LIMITES.xBajoPergola);
+    }
+  } else {
+    // Fuera de la pérgola: sendero + borde de césped
+    p.x = clamp(p.x, -LIMITES.xAfuera, LIMITES.xAfuera);
+  }
+
+  // 4) Colisiones simples con arbustos y pilares (círculos)
+  for (const c of colliders) {
+    const dx = p.x - c.x, dz = p.z - c.z, d = Math.hypot(dx, dz), m = c.r + LIMITES.radioJugador;
+    if (d < m && d > 1e-5) { p.x = c.x + dx / d * m; p.z = c.z + dz / d * m; }
+  }
+  return chocoConPared;
+}
+
+// Visualización opcional de la barrera (tecla B) para ajustar el límite
+const barrierViz = new THREE.Group();
+{
+  const mat = new THREE.MeshBasicMaterial({ color: 0xff3b3b, transparent: true, opacity: .25, side: THREE.DoubleSide, depthWrite: false });
+  const wall = new THREE.Mesh(new THREE.PlaneGeometry(LIMITES.xBajoPergola * 2, 3), mat);
+  wall.position.set(0, 1.5, LIMITES.zMaxAvance - LIMITES.radioJugador);
+  barrierViz.add(wall);
+  for (const sx of [-1, 1]) {
+    const len = ENTRADA_Z - LIMITES.zMaxAvance;
+    const side = new THREE.Mesh(new THREE.PlaneGeometry(len, 3), mat);
+    side.rotation.y = Math.PI / 2;
+    side.position.set(sx * (LIMITES.xBajoPergola + LIMITES.radioJugador), 1.5, LIMITES.zMaxAvance + len / 2);
+    barrierViz.add(side);
+  }
+  barrierViz.visible = false;
+  scene.add(barrierViz);
+}
+
+const toast = document.getElementById('toast');
+let toastTimer = null;
+function showToast() {
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 1600);
+}
+
+// Movimiento con WASD / flechas
+const vel = new V();
+const prevPos = new V();
+let bobT = 0;
+function updateMovement(dt) {
+  const f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
+  const r = ((keys.KeyD || keys.ArrowRight) ? 1 : 0) - ((keys.KeyA || keys.ArrowLeft) ? 1 : 0);
+  // velocidad al caminar (m/s): normal y con Shift. Bájalas o súbelas a tu gusto
+  const speed = (keys.ShiftLeft || keys.ShiftRight) ? 3.8 : 2.0;
+  let tx = r, tz = f;
+  const len = Math.hypot(tx, tz);
+  if (len > 0) { tx /= len; tz /= len; }
+  const k = 1 - Math.exp(-10 * dt);
+  vel.x += (tx * speed - vel.x) * k;
+  vel.z += (tz * speed - vel.z) * k;
+
+  prevPos.copy(camera.position);
+  controls.moveRight(vel.x * dt);
+  controls.moveForward(vel.z * dt);
+  if (aplicarLimites(camera.position, prevPos) && f > 0) showToast();
+
+  const sp = Math.hypot(vel.x, vel.z);
+  bobT += dt * sp * 3.2;
+  camera.position.y = EYE + Math.sin(bobT) * .03 * Math.min(sp / 2.0, 1);
+}
+
+/* =========================================================
+   BUCLE PRINCIPAL
+   ========================================================= */
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), .05);
+  if (isActive()) updateMovement(dt);
+  sky.position.copy(camera.position);
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
